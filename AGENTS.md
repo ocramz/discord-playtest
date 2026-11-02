@@ -1,7 +1,7 @@
 # Agent instructions
 
 ## Design
-- docs/design/playtest-design.md is the authoritative and should only be changed if the specs are impossible or contradictory. 
+- docs/design/playtest-design.md is the authoritative design document and should only be changed if the specs are impossible or contradictory. 
 
 ## Engineering and coding practices
 - make illegal states unrepresentable 

@@ -1,30 +1,11 @@
 # Playtest: a TestFlight for collective game development on Discord
 
-> **Design document** · Draft v0.4 (Free-plan edition) · 2 November 2026
-> Status: proposal for review · Owner: _TBD_ · Reviewers: _TBD_
+> **Design document** · Draft v0.5 (Free-plan edition) · 2 November 2026
 > "Playtest" is a working name.
 
 > **Platform constraint.** Sections 0–20 use only features available on Cloudflare's **Workers Free** plan. Everything that requires a paid plan, or only works at a useful scale on one, is collected in [§21 Paid-plan upgrades](#21-paid-plan-upgrades). Heavy compute that the Free plan can't host runs in two places:
 > - the project's own GitHub Actions, which are free for public repositories on standard runners;
 > - the players' browsers.
-
-**Changes in v0.4**
-
-- New §20 covers author onboarding:
-  - the `@playtest/cli` (`create`, `init`, `check`, `dev`, `replay`, `skills install`);
-  - the Discord setup wizard;
-  - the readiness report with finding codes PT001–PT022;
-  - the local harness and a tier ladder;
-  - five agent-skill stubs (shipped in `playtest-skills/`).
-- Paid-plan upgrades are now §21 and references §22.
-
-**Changes in v0.3**
-
-- Server-side builds and isolate replays (Dynamic Workers) moved to §21. Builds now run in the project's CI and in the author's browser (§7).
-- Headless replays run in players' browsers (advisory) and in CI (authoritative) (§15). Browser Rendering and Containers moved to §21.
-- Build files are served from a public R2 bucket through a second Discord URL mapping, so they don't consume Worker requests (§4.3, §7.6).
-- New §4.4 covers Free-plan limits, design rules and capacity estimates.
-- LLM execution tools run in the requester's browser (§12). GitHub writes go through a ProjectDO outbox drained by alarms (§11.9).
 
 ## Contents
 
@@ -32,7 +13,7 @@
 1. [Goals, non-goals, requirements](#1-goals-non-goals-requirements)
 2. [Glossary](#2-glossary)
 3. [Decision summary](#3-decision-summary)
-4. [Architecture](#4-architecture) (incl. [4.4 Free-plan constraints and budget](#44-free-plan-constraints-and-budget))
+4. [Architecture](#4-architecture) (incl. [4.3 Deployment profiles](#43-deployment-profiles-hostnames-and-routes) and [4.4 Free-plan constraints and budget](#44-free-plan-constraints-and-budget))
 5. [Discord integration](#5-discord-integration)
 6. [Game runtime and debug API](#6-game-runtime-and-debug-api)
 7. [Builds and serving](#7-builds-and-serving)
@@ -72,7 +53,7 @@ Core ideas:
 4. **Cloudflare Workers Free plan only.** The backend is:
    - one Worker, which also serves the shell as free static assets;
    - four SQLite-backed Durable Object classes;
-   - R2, including a public bucket on a custom domain that serves build files without touching the Worker.
+   - R2 for builds and state. Game files are served by the Worker on a free `workers.dev` hostname (no-domain profile). Once a domain is added, they're served straight from the bucket via a custom domain (domain profile, §4.3).
 
    Heavy compute never runs on Cloudflare:
    - **The project's GitHub Actions** (free for public repositories) do builds, determinism verification, authoritative replays and PR checks.
@@ -150,7 +131,9 @@ Core ideas:
 | **Adapter** | Framework-specific glue (Phaser, three.js, PixiJS, Babylon) loaded into the sandbox. |
 | **CI builder** | The reusable GitHub Actions workflow in the project's repository. It produces canonical builds, verifies determinism and runs authoritative retests. |
 | **Browser builder** | The shell's in-browser transformer for interactive workspace edits. Its outputs are labelled *client-built*. |
-| **Public build bucket** | The R2 bucket on `builds.<domain>`, mapped into the Activity at `/g`. It holds immutable, content-addressed files. |
+| **Build bucket** | The R2 bucket `pt-builds`, holding immutable, content-addressed game files served at `/g/`. A custom domain serves it in the domain profile, and the Worker serves it otherwise (§4.3). |
+| **Deployment profile** | *No-domain* (everything on `workers.dev`) or *domain* (the build bucket on a custom domain) (§4.3). |
+| **Bundled mode** | CI output with one JS bundle per build, a shared runtime and assets shared across builds, minimizing files per load (§7.6). |
 | **Outbox** | The ProjectDO table of pending GitHub writes, drained by Durable Object alarms. |
 | **Readiness report** | The result of `playtest check` or a CI build: effective tier, determinism status, findings (PT codes) and next steps (§20.5). |
 | **Agent skill** | A folder with a `SKILL.md` and resources that teaches coding agents the Playtest contract (§20.8). |
@@ -173,7 +156,7 @@ Core ideas:
 | D10 | LLM runtime | AgentDO tool loop; execution tools run in the requester's browser; final validation in CI | Isolate execution (paid, §21); container sandbox (paid) | 12, 16.12 |
 | D11 | LLM keys | Per-server key encrypted in ProjectDO, sent through AI Gateway (free core features) | AI Gateway stored keys; platform-paid key | 12.6 |
 | D12 | Cloudflare plan | **Workers Free only** | Workers Paid ($5/month minimum), §21 | 4.4, 21 |
-| D13 | Serving build files | Public R2 bucket on a custom domain, reached through a second Discord URL mapping | Serving through the Worker (costs daily requests) | 4.3, 7.6, 16.14 |
+| D13 | Serving build files | Two profiles: **no-domain** (the Worker serves bundled builds from R2 on `workers.dev`) and **domain** (R2 bucket on a custom domain via a second Discord URL mapping) | `r2.dev` (development only); GitHub Pages | 4.3, 7.6, 16.14 |
 | D14 | Background work | ProjectDO outbox drained by Durable Object alarms | Cloudflare Queues (free: 10k ops/day, 24 h retention) | 11.9, 16.13 |
 | D15 | CI authentication | GitHub Actions OIDC tokens verified by the Worker; presigned R2 URLs for uploads | Repository secrets holding Playtest credentials | 7.3, 14 |
 
@@ -197,7 +180,7 @@ flowchart TB
     P["ProjectDO<br/>per repo · outbox"]
     WS["WorkspaceDO<br/>per personal copy"]
     A["AgentDO<br/>per LLM task"]
-    R2P[("R2 public bucket<br/>builds · modules · sources · logs")]
+    R2P[("R2 build bucket<br/>builds · modules · sources · logs")]
     R2S[("R2 private bucket<br/>Discord-only screenshots")]
     AIG["AI Gateway"]
   end
@@ -206,7 +189,7 @@ flowchart TB
     CI["GitHub Actions<br/>builds · verification · retests"]
   end
   Shell -->|"API + WSS via Discord proxy"| W
-  Shell -->|"/g/* via second URL mapping"| R2P
+  Shell -->|"/g/* via second URL mapping (domain profile)"| R2P
   Interactions --> W
   W --> S
   W --> P
@@ -227,49 +210,81 @@ flowchart TB
 
 | Component | Keyed by | Owns | Notes |
 |---|---|---|---|
-| **Worker** | n/a | Routing, auth, static shell, webhook and interaction verification, CI authentication, presigning CI uploads, batched client uploads | Stateless; must stay within 10 ms CPU per request (§4.4) |
+| **Worker** | n/a | Routing, auth, static shell, webhook and interaction verification, CI authentication, presigning CI uploads, batched client uploads; game files in the no-domain profile | Stateless; must stay within 10 ms CPU per request (§4.4) |
 | **SessionDO** | Discord `instanceId` | Presence, live feed fan-out, nudges, run-sharing relay | Ephemeral; WebSocket Hibernation API |
 | **ProjectDO** | `github:<owner>/<repo>` | Project config, guild bindings, threads, anchors, comments, retests, runs index, builds index, CI jobs, GitHub mirror map, outbox | Source of truth for feedback |
 | **WorkspaceDO** | workspace ID | Overlay, revisions, live viewers | One per personal copy and per worktree |
 | **AgentDO** | task ID | LLM conversation, tool loop, worktree reference, progress stream | Agents SDK on Durable Objects; execution tools are forwarded to the requester's browser |
-| **R2 public bucket** (`builds.<domain>`) | content hash | CI builds, vendor chunks, browser-built modules, workspace and upstream sources, input logs, keyframes, screenshots of publicly mirrored threads | Served by Cloudflare's CDN; no Worker requests. URLs are unguessable content hashes but not secret (§14.3) |
-| **R2 private bucket** | content hash | Screenshots of Discord-only threads | Served through the Worker |
+| **R2 build bucket** (`pt-builds`) | content hash | CI builds, vendor chunks, browser-built modules, workspace and upstream sources, input logs, keyframes, screenshots of publicly mirrored threads | Domain profile: public via `builds.<domain>`, CDN-cached, no Worker requests. No-domain profile: served by the Worker. URLs are unguessable content hashes but not secret (§14.3) |
+| **R2 private bucket** (`pt-private`) | content hash | Screenshots of Discord-only threads | Served through the Worker |
 | **AI Gateway** | n/a | Proxy to LLM providers: caching, analytics, rate limiting | Free core features |
 | **GitHub Actions** (the project's CI) | workflow run | Canonical builds, determinism verification, authoritative retests, PR checks, `tsc` | Free for public repositories on standard GitHub-hosted runners |
 | **Players' browsers** | n/a | Interactive workspace builds, replays, advisory retests, LLM tool execution, three-way merges, code re-anchoring | Results are labelled with who produced them |
 
-### 4.3 Hostnames, URL mappings and routes
+### 4.3 Deployment profiles, hostnames and routes
 
-The design uses three hostnames:
+Playtest runs in one of two **deployment profiles**. They differ only in how game files reach the sandbox; the code is the same, and configuration selects the profile.
 
-| Hostname | Reached via | Purpose |
+| | **No-domain profile** (default to start) | **Domain profile** |
 |---|---|---|
-| `app.<domain>` | Discord URL mapping `ROOT` | The Worker: shell, API, WebSockets |
-| `builds.<domain>` | Discord URL mapping `/g` | R2 public bucket on a custom domain: game files and other immutable content |
-| `pub.<domain>` | Direct (Discord and GitHub call it) | Interactions, webhooks, CI endpoints, onboarding |
+| Requires | A Cloudflare account | A domain whose DNS is a zone in the same Cloudflare account (the Free zone plan is fine) |
+| Hostnames | One: `playtest.<account>.workers.dev` | Worker on `workers.dev` or a custom hostname, plus `builds.<domain>` for the build bucket |
+| Discord URL mappings | `ROOT` only | `ROOT`, plus `/g` → `builds.<domain>` |
+| Game files (`/g/*`) | Served by the Worker from the build bucket; each file costs a Worker request | Served by the bucket's custom domain, CDN-cached; no Worker requests |
+| CI build output | **Bundled mode** (§7.6): one JS bundle per build, shared runtime, assets shared across builds | Bundled or per-module mode |
+| Public screenshots for mirrored GitHub issues | Worker route `/s/<sha256>.png` | `builds.<domain>/shot/<sha256>.png` |
+| Rough capacity (§4.4.3) | ~2,000–3,500 play sessions/day | ~4,000 play sessions/day |
+| Best for | Development, small communities, first launch | Public launch, busy servers |
 
-Clients follow Discord's proxy path conventions (`/.proxy/...`); spike S11 verifies this. The public bucket's CORS policy returns `Access-Control-Allow-Origin: *` for `GET`/`HEAD`, which the opaque-origin sandbox needs. Every object is uploaded with its `Content-Type` and `Cache-Control: public, max-age=31536000, immutable`.
+**Why only the build bucket needs a domain.** R2 can make a bucket public in only two ways:
+
+- a custom domain, which must be a zone in the same account;
+- the managed `r2.dev` URL, which is rate-limited, uncached and intended for development.
+
+Everything else accepts a `workers.dev` URL: the Discord URL-mapping target, the interactions endpoint, GitHub webhooks and the CI endpoints.
+
+**Switching from no-domain to domain** needs no data migration or client change:
+
+1. **Buckets.** Two buckets exist from day one:
+   - `pt-builds`, for game files: public access off in the no-domain profile, with the Worker serving it;
+   - `pt-private`, for Discord-only screenshots.
+2. **Domain setup.** Add the domain as a zone, attach `builds.<domain>` to `pt-builds` as a custom domain, and set its CORS policy (§7.6).
+3. **Discord mapping.** Add the URL mapping `/g` → `builds.<domain>`. Clients keep requesting `/g/…`; the more specific mapping should take precedence over `ROOT` (to verify, Q16). The Worker's `/g/*` route stays as a fallback.
+4. **Configuration.** Set `PROFILE=domain`, which changes public screenshot URLs and lets CI use per-module mode.
+5. **Optional.** Move the Worker to `app.<domain>` for stable URLs. That means updating the Discord `ROOT` mapping, the interactions endpoint and the GitHub App URLs. It isn't required.
+
+**Routes.** The table uses logical hosts:
+
+- `app`: the Worker, reached through the Discord proxy;
+- `pub`: the Worker, called directly by Discord and GitHub;
+- `builds`: game files.
+
+In the no-domain profile all three are the same `workers.dev` hostname, and `builds` paths are served by the Worker's `/g/*` route. Clients follow Discord's proxy path conventions (`/.proxy/...`); spike S11 verifies this. Every `/g/` response carries `Content-Type`, `Cache-Control: public, max-age=31536000, immutable` and `Access-Control-Allow-Origin: *`, which the opaque-origin sandbox needs. These come from the bucket's CORS policy or from the Worker, depending on the profile.
 
 | Host | Path | Handler | Notes |
 |---|---|---|---|
 | app | `/`, `/assets/*` | Static shell (Workers static assets) | Free and unlimited |
 | app | `POST /api/token` | OAuth code exchange plus instance membership check | §5.2 |
 | app | `/api/*` | REST: projects, threads, workspaces, builds, runs | Session token required |
-| app | `POST /api/upload` | Batched upload of content-addressed files (≤ 40 files, ≤ 4 MB per request) into the public bucket | Browser builder, screenshots, logs |
+| app | `POST /api/upload` | Batched upload of content-addressed files (≤ 40 files, ≤ 4 MB per request) into the build bucket | Browser builder, screenshots, logs |
 | app | `GET /api/private/shot/:sha256` | Discord-only screenshots from the private bucket | Session token required |
 | app | `/ws/session/:instanceId` | SessionDO | WebSocket |
 | app | `/ws/workspace/:id` | WorkspaceDO | Live edits (optional) |
 | app | `/ws/agent/:taskId` | AgentDO | Progress and forwarded tool calls |
+| app | `GET /g/*` | Worker reads `pt-builds` | No-domain profile (fallback in the domain profile); no authentication, content-addressed URLs |
 | builds | `/b/<buildHash>/…` | CI builds | Immutable |
-| builds | `/v/<lockfileHash>/…` | Vendor chunks (dependencies) | Immutable |
+| builds | `/r/<runtimeVersion>/runtime.js` | Harness runtime and adapters, shared by all builds | Immutable |
+| builds | `/a/<sha256>.<ext>` | Assets, shared across builds (bundled mode) | Content-addressed |
+| builds | `/v/<lockfileHash>/…` | Vendor chunks (per-module mode only) | Immutable |
 | builds | `/m/<sha256>.js` | Browser-built workspace modules | Content-addressed |
 | builds | `/ws/<sha256>`, `/src/<gitBlobSha>` | Workspace and upstream source files | Content-addressed |
 | builds | `/run/<sha256>.ptil`, `/snap/<sha256>.bin` | Input logs, keyframes | Content-addressed |
 | builds | `/shot/<sha256>.png` | Screenshots of publicly mirrored threads | Deleted with the thread |
+| pub | `/s/:sha256.png` | Public screenshots for GitHub issues (no-domain profile) | GitHub's image proxy caches them |
 | pub | `/discord/interactions` | Slash commands and components | Ed25519 signature check |
 | pub | `/github/webhook`, `/github/setup`, `/github/callback` | GitHub App | §11 |
 | pub | `GET /ci/job/:id` | Job spec for a CI run (what to build or retest) | OIDC-authenticated (§7.3) |
-| pub | `POST /ci/presign` | Presigned `PUT` URLs scoped to the job's prefix | OIDC-authenticated |
+| pub | `POST /ci/presign` | Presigned `PUT`/`GET` URLs scoped to the job's prefixes | OIDC-authenticated; R2's S3 endpoint needs no custom domain |
 | pub | `POST /ci/result` | Build, verification and retest results | OIDC-authenticated |
 
 ### 4.4 Free-plan constraints and budget
@@ -280,7 +295,7 @@ Clients follow Discord's proxy path conventions (`/.proxy/...`); spike S11 verif
 |---|---|---|
 | Workers | 100,000 requests/day (Error 1027 beyond, until 00:00 UTC); **10 ms CPU per request**; 50 external subrequests and 1,000 subrequests to Cloudflare services per invocation; static asset requests free and unlimited | Routing and verification only; shell as static assets; game files bypass the Worker |
 | Durable Objects (SQLite backend only) | 100,000 requests/day, including inbound WebSocket messages; 13,000 GB-s/day duration; 5 M rows read and 100 k rows written per day; 5 GB total storage | Hibernating WebSockets; change-only presence; batched writes |
-| R2 | 10 GB-month storage; 1 M Class A and 10 M Class B operations per month | Content-addressed public bucket behind the CDN; GC of unreferenced objects |
+| R2 | 10 GB-month storage; 1 M Class A and 10 M Class B operations per month | Content-addressed build bucket; GC of unreferenced objects. In the no-domain profile, Class B reads are bounded by Worker requests (≤ ~3 M/month) |
 | AI Gateway | Core features free; 10 gateways per account; capped log storage | One gateway; per-server caps enforced in ProjectDO |
 | Cron Triggers | 5 per account | One daily GC sweep |
 | Queues *(not used by default)* | 10,000 operations/day; 24 h retention | Alternative to the outbox (§16.13) |
@@ -294,7 +309,9 @@ On the Free plan, exceeding a limit makes further operations fail until 00:00 UT
 #### 4.4.2 Design rules
 
 1. **No heavy CPU on Cloudflare.** No archive unpacking, bundling, large diffs, merges or replays in the Worker or in Durable Objects. These run in CI or in browsers.
-2. **Game files never pass through the Worker.** Builds, modules, sources, logs and keyframes are served from the public bucket via the `/g` mapping.
+2. **Keep game-file traffic off the Worker:**
+   - **Domain profile:** game files never pass through the Worker; the bucket's custom domain serves `/g/*`.
+   - **No-domain profile:** CI emits bundled builds (a handful of files per load). Every file is immutable and content-addressed, so returning players load from their browser cache. Assets are shared across builds, so a new build only costs its changed files.
 3. **WebSockets stay quiet:**
    - only the Hibernation API is used;
    - presence is sent on change and at most once every 5 s;
@@ -316,7 +333,8 @@ These are rough planning numbers, based on the assumptions in the "Cost driver" 
 
 | Resource | Cost driver | Rough daily capacity |
 |---|---|---|
-| Worker requests (100k/day) | ~25 per play session: token, API calls, uploads, WebSocket upgrades | ~4,000 play sessions |
+| Worker requests (100k/day), domain profile | ~25 per play session: token, API calls, uploads, WebSocket upgrades | ~4,000 play sessions |
+| Worker requests (100k/day), no-domain profile | The same ~25 plus game files: ~3 for a returning player (assets cached), ~3 + number of assets on a cold device | ~3,500 sessions if most players return; ~2,000 if every load is cold with ~20 assets |
 | DO requests (100k/day) | 1 per WebSocket connect, plus ~30 inbound messages per active player-hour (change-only presence), plus feedback actions | ~2,500–3,000 player-hours (more if the 20:1 ratio applies) |
 | DO rows written (100k/day) | ~3 rows per persisted revision; ~20 revisions per editing hour; threads and comments | ~1,500 editor-hours |
 | R2 Class A (≈33k/day averaged) | ~5–30 objects per workspace revision; ~50–300 per CI build | ~1,000 revisions plus ~50 CI builds |
@@ -328,9 +346,9 @@ These are rough planning numbers, based on the assumptions in the "Cost driver" 
 
 ### 5.1 Activity shell and proxy constraints
 
-- **Two URL mappings:**
-  - `ROOT` points at `app.<domain>` (the Worker), and every request uses a relative path.
-  - `/g` points at `builds.<domain>` (the public R2 bucket), so game files never consume Worker requests (§4.3).
+- **URL mappings:**
+  - `ROOT` points at the Worker (`workers.dev`, or `app.<domain>`), and every request uses a relative path.
+  - In the domain profile, a second mapping `/g` points at `builds.<domain>` (the build bucket), so game files don't consume Worker requests (§4.3).
 
   `patchUrlMappings` is not needed if no third-party code calls external hosts.
 - **Constraints, from Discord's docs and developer reports:**
@@ -434,14 +452,14 @@ When all users leave, the instance ends and the next launch gets a new `instance
 Two trust domains live inside the Activity iframe:
 
 - **Shell (trusted).** Holds the Discord access token and session token, the Diffs editor, and the *harness controller*. The controller decides when ticks happen, records input, stores keyframes and talks to the backend.
-- **Sandbox (untrusted).** A nested `<iframe sandbox="allow-scripts">` with no `allow-same-origin`, which gives it an opaque origin. It loads either `/g/b/<buildHash>/index.html` (CI builds) or a workspace entry under `/g/m/` (browser builds), both from the public build bucket (§4.3). The page contains the *harness runtime*, an optional *adapter*, and the game.
+- **Sandbox (untrusted).** A nested `<iframe sandbox="allow-scripts">` with no `allow-same-origin`, which gives it an opaque origin. It loads either `/g/b/<buildHash>/index.html` (CI builds) or a workspace entry under `/g/m/` (browser builds), both under `/g/` (§4.3). The page contains the *harness runtime*, an optional *adapter*, and the game.
 
 The shell and the sandbox talk only through a `MessageChannel` (§6.13).
 
 Properties of the sandbox:
 
 - **Isolation from the shell.** It cannot read the shell's DOM, cookies, tokens or the Discord SDK.
-- **CORS on every artifact.** Module scripts loaded from an opaque origin are CORS requests, so the public bucket's CORS policy returns `Access-Control-Allow-Origin: *` for every object.
+- **CORS on every artifact.** Module scripts loaded from an opaque origin are CORS requests, so every `/g/` response carries `Access-Control-Allow-Origin: *`, from the bucket's CORS policy or from the Worker depending on the profile.
 - **No real input.** The shell covers the sandbox with a transparent capture layer (`pointer-events: none` on the iframe), so the sandbox never receives real input. All input flows through the harness, which also removes focus problems with nested iframes.
 - **Pointer lock is requested by the shell.** When game code calls `requestPointerLock()`, a shim forwards the request; the shell locks the pointer on its own overlay and forwards movement as axes. The sandbox therefore doesn't need `allow-pointer-lock`, but Discord's own iframe must allow pointer lock (spike item S4).
 - **Bootstrap order.** `runtime.js` is a classic script that installs all virtualization shims first and then calls `import('./game.js')`, so no game code runs before the shims are in place.
@@ -715,7 +733,7 @@ The protocol runs over a `MessageChannel`, with structured-clone messages and tr
 
 ### 6.14 Frame capture
 
-- **Screenshots.** Taken inside the render hook, immediately after the render call and in the same task. This avoids WebGL's cleared-buffer problem without `preserveDrawingBuffer`. The adapter calls `createImageBitmap(canvas)`, transfers the bitmap to the shell, which encodes a PNG (OffscreenCanvas) and uploads it by SHA-256. It goes to the private bucket for Discord-only threads, and is copied to the public bucket only if the thread is mirrored publicly.
+- **Screenshots.** Taken inside the render hook, immediately after the render call and in the same task. This avoids WebGL's cleared-buffer problem without `preserveDrawingBuffer`. The adapter calls `createImageBitmap(canvas)`, transfers the bitmap to the shell, which encodes a PNG (OffscreenCanvas) and uploads it by SHA-256. It goes to the private bucket for Discord-only threads, and is copied to the build bucket only if the thread is mirrored publicly.
 - **Clips.** Tier 0 games, and optionally others, can capture short clips with `MediaRecorder` on `canvas.captureStream()`. Whether this works inside the sandbox on all clients is spike item S10.
 
 ---
@@ -775,19 +793,22 @@ jobs:
 **What the reusable workflow does:**
 
 1. **Fetch the job spec.** It requests an OIDC token for audience `playtest` and calls `GET /ci/job/:id`. `push` and `pull_request` events get an implicit job created on the fly.
-2. **Check out the source.** For workspace jobs, it checks out the base commit and applies the overlay listed in the job spec, downloading files from the public bucket. Overlay paths under `.github/` are rejected.
+2. **Check out the source.** For workspace jobs, it checks out the base commit and applies the overlay listed in the job spec, downloading files from the build bucket. Overlay paths under `.github/` are rejected.
 3. **Install dependencies** with `npm ci --ignore-scripts`. Install scripts never run.
-4. **Prebundle dependencies** into vendor chunks keyed by `lockfileHash`. This is skipped if `/g/v/<lockfileHash>/` already exists.
+4. **Prebundle dependencies** into vendor chunks keyed by `lockfileHash` (per-module mode only). This is skipped if `/g/v/<lockfileHash>/` already exists.
 5. **Transform sources:**
    - type-strip and rewrite imports to absolute URLs;
-   - emit `index.html` (no inline scripts), `runtime.js`, `adapter.js`, the modules, source maps and assets;
+   - emit `index.html` (no inline scripts) referencing the shared `/g/r/<runtimeVersion>/runtime.js`;
+   - **bundled mode** (always in the no-domain profile): emit one ESM bundle including vendor code, plus an asset map. Upload assets content-addressed to `/g/a/<sha256>.<ext>` (§7.6);
+   - **per-module mode:** emit one file per module plus vendor chunks;
+   - in both modes, emit source maps;
    - also upload the source files to `/src/<gitBlobSha>` for the code view.
 6. **Verify:**
    - lint (§6.9.3);
    - the double-run determinism check (§6.9.6): Node for Tier 3, Playwright Chromium for Tiers 1–2;
    - `tsc --noEmit`, if the project has a `tsconfig.json`.
 7. **Run retests** listed in the job spec (§15), if any.
-8. **Upload.** Request presigned `PUT` URLs from `POST /ci/presign` (one batch of up to 100 per call, scoped to `b/<buildHash>/`, valid for 15 minutes), then upload directly to R2's S3 endpoint.
+8. **Upload.** Request presigned `PUT` URLs from `POST /ci/presign` (one batch of up to 100 per call, scoped to `b/<buildHash>/` and `a/`, valid for 15 minutes), then upload directly to R2's S3 endpoint. This works in both profiles, because the S3 endpoint needs no custom domain. Assets that already exist are skipped.
 9. **Report.** `POST /ci/result` sends the build hash, effective tier, determinism status, lint/`tsc` summary, retest results and run URL.
 
 **Authentication.** The Worker verifies the OIDC JWT, which is cheap: it's an RS256 check via WebCrypto against GitHub's cached JWKS. It requires:
@@ -819,18 +840,47 @@ The browser builder runs in the author's shell, in pure JavaScript, so it's safe
 
 ### 7.5 Source acquisition
 
-- **CI uploads source files.** Upstream source files are uploaded by CI to `/g/src/<gitBlobSha>`, so the code view and Diffs never call the GitHub API from the browser and never cost Worker requests.
+- **CI uploads source files.** Upstream source files are uploaded by CI to `/g/src/<gitBlobSha>`, so the code view and Diffs never call the GitHub API from the browser. In the domain profile they also cost no Worker requests.
 - **ProjectDO stores tree listings.** It keeps the listing for each built commit: paths and blob SHAs, reported in `/ci/result`.
 - **Before any CI build exists,** for example right after linking, the code view falls back to GitHub's public web URLs, opened outside the Activity.
 
-### 7.6 Serving and hot reload
+### 7.6 Serving, build output modes and hot reload
 
-- **Delivery.** Everything under `/g/` is served by the public R2 bucket through the second Discord URL mapping, cached by Cloudflare's CDN, and costs no Worker requests.
+**Delivery.** All game files live under `/g/`, in both profiles:
+
+- in the domain profile, the bucket's custom domain serves them, CDN-cached;
+- in the no-domain profile, the Worker serves them.
+
+Every URL is content-addressed or scoped by build hash, so files never change. Every response is marked immutable, so returning players load unchanged files from their browser cache.
+
+**Output modes:**
+
+| | **Bundled mode** | **Per-module mode** |
+|---|---|---|
+| Files per game load | `index.html`, the shared `runtime.js`, one `game.<hash>.js` bundle (vendor code included), plus assets | `index.html`, `runtime.js`, one file per module and vendor chunk, plus assets |
+| Typical Worker requests per load (no-domain) | ~3 when assets are cached; ~3 + number of assets on a cold device | Dozens |
+| Deduplication across builds | Runtime and assets; the bundle changes per build | Unchanged modules keep their URLs |
+| Used by | CI in the no-domain profile (required); CI in the domain profile (optional) | Browser builder (workspace edits); CI in the domain profile |
+
+**Assets shared across builds.**
+
+- CI uploads each asset to `/g/a/<sha256>.<ext>` and writes an asset map (logical path → hash) into the bundle.
+- The runtime's loading shim, which already intercepts `fetch`/`Image`/`Audio` loads for the loading barrier (§6.9.4), rewrites logical paths such as `assets/hero.png` to their content-addressed URLs.
+- A new build therefore only costs requests for assets that actually changed.
+
+**Optional asset packs.** A single pack file for all small assets would cut cold loads to about four files. However, it requires loading images from `blob:` or `data:` URLs inside the sandbox, which Discord's CSP may forbid. It's used only if spike S19 shows that it works.
+
+**Loading:**
+
 - **Upstream builds** are loaded from `/g/b/<buildHash>/index.html`.
 - **Workspace revisions** get a new entry module URL each time, so module instances never go stale. No blob URLs are used, because CSP blocks them.
-- **Hot reload:**
-  - Tier 3: the runtime imports the new module graph and swaps `tick`/`render` on the live state.
-  - Tiers 1–2: the sandbox reloads, then either restores a compatible keyframe (Tier 2) or re-simulates the current run (Tier 1).
+  - In the no-domain profile, browser-built modules are served by the Worker. The author's device has them cached, but other viewers pay one request per module on first load.
+  - **Share** on a workspace therefore offers a CI bundled build when the project has CI.
+
+**Hot reload:**
+
+- Tier 3: the runtime imports the new module graph and swaps `tick`/`render` on the live state.
+- Tiers 1–2: the sandbox reloads, then either restores a compatible keyframe (Tier 2) or re-simulates the current run (Tier 1).
 
 ### 7.7 Edit-and-continue and schema changes
 
@@ -883,7 +933,7 @@ interface OverlayEntry { path: string; sha256: string | null; mode: "100644" | "
 ### 8.3 Storage
 
 - Overlay entries and the revision log live in WorkspaceDO SQLite.
-- File contents are uploaded by the shell to the public build bucket at `/g/ws/<sha256>`. They're content-addressed, so URLs are unguessable but not secret (§14.3). Files under 16 KB are also kept inline in SQLite.
+- File contents are uploaded by the shell to the build bucket and served at `/g/ws/<sha256>`. They're content-addressed, so URLs are unguessable but not secret (§14.3). Files under 16 KB are also kept inline in SQLite.
 - Each revision stores its overlay digest and `buildHash`.
 
 ### 8.4 Editor and review UI
@@ -1154,7 +1204,7 @@ Mirroring is per server and **off by default**. Each thread can also be marked "
 
 | Platform object | GitHub object |
 |---|---|
-| Frame or error thread on an upstream build | Issue labelled `playtest`, `playtest:frame`. The body holds the screenshot (public bucket URL), `FrameRef`, build, tier, expectation, deep link, and a retest-matrix section between HTML-comment markers that the App rewrites |
+| Frame or error thread on an upstream build | Issue labelled `playtest`, `playtest:frame`. The body holds the screenshot (a public URL: `builds.<domain>` or the Worker's `/s/` route, depending on the profile), `FrameRef`, build, tier, expectation, deep link, and a retest-matrix section between HTML-comment markers that the App rewrites |
 | Code thread on a workspace that has an open PR | PR review comment using `line`/`side`/`start_line`. Lines outside the diff become file-level comments (`subject_type: file`) |
 | Code thread on an upstream commit, no PR | Issue with a SHA-pinned permalink (`/blob/<sha>/<path>#L10-L14`) |
 | Thread on a workspace without a PR | Not mirrored; backfilled as review comments when a PR is opened |
@@ -1176,7 +1226,7 @@ PR checks run inside the project's own CI workflow (§7.3), not on Cloudflare.
 
 1. On `pull_request` (opened, synchronize, reopened), the workflow builds the PR head.
 2. It fetches the retest list from `GET /ci/job/:id`, which ProjectDO creates when it sees the webhook. The list is the open frame and error threads, capped per run (default 25): those with expectations first, then recent ones, then ones with the most reactions.
-3. It downloads each thread's input log and keyframe from the public bucket and runs the retests: Node for Tier 3, Playwright Chromium for Tiers 1–2.
+3. It downloads each thread's input log and keyframe from the build bucket via presigned `GET` URLs and runs the retests: Node for Tier 3, Playwright Chromium for Tiers 1–2.
 4. It posts results to `/ci/result`.
 5. ProjectDO publishes a Check Run through the App, with:
    - a summary table (fixed / reproduces / diverged / crashed / inconclusive);
@@ -1236,7 +1286,7 @@ Implemented with the Cloudflare Agents SDK, which is built on Durable Objects an
 
 | Tool | Runs in | Notes |
 |---|---|---|
-| `list_files(glob)`, `read_file(path, range?)`, `search(query)` | AgentDO (reads overlay index; file contents from the public bucket) | Read the worktree |
+| `list_files(glob)`, `read_file(path, range?)`, `search(query)` | AgentDO (reads overlay index; file contents from the build bucket) | Read the worktree |
 | `write_file(path, content)`, `apply_patch(unifiedDiff)` | AgentDO | Write the worktree only; content uploaded content-addressed |
 | `build()` | Requester's browser (browser builder) | Transform/lint errors, determinism double-run |
 | `replay(runRef, untilTick, expectation?)` | Requester's browser (hidden sandbox) | Outcome, checkpoint comparison, errors |
@@ -1334,20 +1384,22 @@ CREATE TABLE overlay (rev INTEGER, path TEXT, sha256 TEXT, mode TEXT, inline BLO
 
 ### 13.3 R2 layout
 
-**Public bucket** (`builds.<domain>`, mapped into the Activity at `/g`):
+**Build bucket** (`pt-builds`). It is served at `/g/*`: by `builds.<domain>` in the domain profile, by the Worker otherwise.
 
 | Prefix | Content | Written by |
 |---|---|---|
 | `b/<buildHash>/…` | CI builds | CI (presigned) |
+| `r/<runtimeVersion>/…` | Harness runtime and adapters | Platform release |
+| `a/<sha256>.<ext>` | Assets shared across builds | CI (presigned) |
 | `v/<lockfileHash>/…` | Vendor chunks | CI (presigned) |
 | `m/<sha256>.js` | Browser-built workspace modules | Shell via `/api/upload` |
 | `ws/<sha256>` | Workspace source files | Shell via `/api/upload` |
 | `src/<gitBlobSha>` | Upstream source files | CI (presigned) |
 | `run/<sha256>.ptil` | Input logs | Shell via `/api/upload` |
 | `snap/<sha256>.bin` | Keyframes / snapshots | Shell via `/api/upload` |
-| `shot/<sha256>.png` | Screenshots of publicly mirrored threads | Worker (copied when mirroring is enabled) |
+| `shot/<sha256>.png` | Screenshots of publicly mirrored threads (served at `/s/` in the no-domain profile) | Worker (copied when mirroring is enabled) |
 
-**Private bucket:**
+**Private bucket** (`pt-private`):
 
 | Prefix | Content |
 |---|---|
@@ -1413,7 +1465,7 @@ Handling rules:
 - **Data stored about Discord users:** ID, display name and avatar hash.
 - **Public GitHub content:** contains a user's display name only if they opted in. Otherwise they are credited as "a playtester".
 - **Screenshots:** contain only game content, because the sandbox never sees Discord data.
-- **Public build bucket:** builds, workspace sources, input logs and keyframes are readable by anyone holding the URL. URLs are content hashes (unguessable) but not secret. Screenshots of Discord-only threads live in the private bucket and are served through the Worker.
+- **Build bucket:** `/g/*` is served without authentication in both profiles. The sandbox has an opaque origin and carries no credentials. Builds, workspace sources, input logs and keyframes are therefore readable by anyone holding the URL. URLs are content hashes (unguessable) but not secret. Screenshots of Discord-only threads live in the private bucket and are served through the Worker.
 
 ### 14.4 User rights
 
@@ -1459,7 +1511,7 @@ interface ReplayRunner {
 
 1. ProjectDO creates a `ci_job` describing the builds and runs to retest.
 2. It calls `workflow_dispatch` with the job ID.
-3. The workflow fetches the spec (`GET /ci/job/:id`, with OIDC), downloads logs and keyframes from the public bucket, runs the replays, and posts results (`/ci/result`).
+3. The workflow fetches the spec (`GET /ci/job/:id`, with OIDC), downloads logs and keyframes from the build bucket (presigned `GET`), runs the replays, and posts results (`/ci/result`).
 
 **Batching.** One job retests many threads. New upstream builds and PR checks reuse the build job, with no extra dispatch.
 
@@ -1598,9 +1650,10 @@ Options marked **(paid)** require a Cloudflare paid plan and are detailed in §2
 
 | Option | Verdict |
 |---|---|
-| **Public R2 bucket on a custom domain via a second Discord URL mapping** | Chosen: no Worker requests, CDN-cached |
-| Worker reading from R2 | Rejected: every file costs a Worker request against the 100k/day allowance |
-| `r2.dev` public URL | Rejected: rate-limited and intended for development |
+| **R2 bucket on a custom domain via a second Discord URL mapping** | Chosen for the **domain profile**: no Worker requests, CDN-cached |
+| **Worker reading from R2, with bundled builds and immutable caching** | Chosen for the **no-domain profile**: costs Worker requests, kept low by bundling, shared assets and browser caching |
+| `r2.dev` public URL | Development only: rate-limited, no caching |
+| Workers static assets | Rejected: assets are deployed with each Worker version, not uploaded per build |
 | GitHub Pages deployed by CI | Possible, but couples Playtest to each repository's Pages settings |
 
 ---
@@ -1624,6 +1677,7 @@ Options marked **(paid)** require a Cloudflare paid plan and are detailed in §2
 | R11 | Client-built outputs that don't match their source | L | M | Badges; CI rebuild before PR checks or upstream proposals |
 | R12 | CI latency makes authoritative retests feel slow | M | L | Client retests for interactive use; CI for checks and proposals |
 | R13 | OIDC unavailable for fork PRs | H | L | `workflow_run` follow-up publisher (§7.3) |
+| R14 | No-domain capacity depends on Discord clients caching immutable `/g/*` responses | M | M | Spike S19; bundled mode; switch to the domain profile (§4.3) |
 
 ### 17.2 Open questions
 
@@ -1637,13 +1691,14 @@ Options marked **(paid)** require a Cloudflare paid plan and are detailed in §2
 | Q6 | Do Phaser Arcade fixed-step and PixiJS asset loading behave as assumed under virtualization? | Spike S3/S5 |
 | Q7 | Should Tier 0 integrate Unity/Godot pause hooks? | Post-v1 |
 | Q8 | Licensing: building and serving modified versions of public repos | App installation by a maintainer counts as consent; document this in the onboarding notice |
-| Q9 | Does Discord's proxy forward the `/g` mapping to an R2 custom domain with correct `Content-Type` and CORS for an opaque (`null`) origin? | Spike S15 |
+| Q9 | (Domain profile) Does Discord's proxy forward the `/g` mapping to an R2 custom domain with correct `Content-Type` and CORS for an opaque (`null`) origin? | Spike S15 |
 | Q10 | Does the 20:1 inbound-WebSocket ratio apply to the Free plan's daily DO request quota? | Spike S13; plan assumes no |
 | Q11 | What is the CPU limit per Durable Object request on Free? | Spike S14; plan assumes 10 ms |
 | Q12 | Can GitHub's new-file page be prefilled (path and contents) for one-click workflow setup? | Verify; copy-paste fallback |
 | Q13 | Could R2 temporary, prefix-scoped credentials replace per-file presigning for CI uploads? | Verify availability on Free |
 | Q14 | Where to publish agent skills beyond `playtest skills install`? | Claude Code plugin plus individual `.skill` packages; other agents via the generic `skills/` folder layout |
 | Q15 | How strictly should `playtest check` gate CI (fail the build versus annotate)? | Annotate by default; maintainers can opt into failing on errors |
+| Q16 | Does Discord's proxy give a more specific mapping (`/g`) precedence over `ROOT`? | Spike S15. If not, use a distinct prefix (e.g. `/gb`) in the domain profile and make the client path configurable |
 
 ---
 
@@ -1667,21 +1722,22 @@ Run this before committing to P1. Each item has a pass criterion; failures feed 
 | S12 | Deep links: `custom_id` round trip from a bot card into an existing or new instance; length limit | Thread opens at the anchored frame |
 | S13 | Free-plan accounting under a load test:<br>• Worker requests and DO requests per player-hour<br>• whether the 20:1 WebSocket ratio applies to the free quota<br>• error codes at the limits | §4.4.3 numbers replaced by measurements |
 | S14 | CPU per request on Free:<br>• Worker: presigning 100 URLs, OIDC verification, webhook verification<br>• DO: outbox batch, thread queries | All under the effective limit with margin |
-| S15 | R2 custom domain through the Discord proxy: `Content-Type`, CORS for `Origin: null`, CDN caching | Modules load in the sandbox without errors |
+| S15 | Domain profile: R2 custom domain through the Discord proxy, checking `Content-Type`, CORS for `Origin: null`, CDN caching and mapping precedence over `ROOT` | Modules load in the sandbox without errors |
 | S16 | Browser builder: transforming 200 files on a mid-range phone; upload size per typical edit | Edit-to-play under 2 s for a typical change |
 | S17 | `playtest init` detection on ~20 open-source games per framework (Phaser, three.js, PixiJS, Babylon) | Correct adapter and entry in ≥ 90%; viewport/inputs need at most one correction |
 | S18 | Agent skills baseline: run each skill's evals with and without the skill | Measurable improvement in `playtest check` outcomes with the skill |
+| S19 | No-domain profile:<br>• Worker requests per session, cold versus warm<br>• whether Discord desktop, iOS and Android clients cache immutable `/g/*` responses<br>• whether `blob:`/`data:` images work in the sandbox (asset packs) | §4.4.3 no-domain capacity confirmed; asset-pack decision made |
 
 ---
 
 ## 19. Phased delivery plan
 
-All phases target the Workers Free plan; §21 upgrades are optional and independent.
+All phases target the Workers Free plan; §21 upgrades are optional and independent. Start on the no-domain profile, and switch to the domain profile (§4.3) before a public launch or when Worker requests regularly exceed 70% of the daily allowance.
 
 | Phase | Scope | Exit criterion |
 |---|---|---|
 | **P0 Spike** | §18 | All items pass or have a documented fallback |
-| **P1 Playtest MVP** | Shell and auth; `/playtest link` (App + workflow); CI builder and public bucket; harness Tiers 1 and 3; three.js and Phaser adapters; frame threads; bot feed; client retests; quota guards and budgets; `@playtest/cli` `init`/`check`; readiness report; `playtest` and `playtest-onboard` skills | A server playtests a public Phaser game and a three.js game, leaves frame feedback, and reopens exact frames, within Free-plan limits |
+| **P1 Playtest MVP** | Shell and auth; `/playtest link` (App + workflow); CI builder in bundled mode on the no-domain profile; harness Tiers 1 and 3; three.js and Phaser adapters; frame threads; bot feed; client retests; quota guards and budgets; `@playtest/cli` `init`/`check`; readiness report; `playtest` and `playtest-onboard` skills | A server playtests a public Phaser game and a three.js game, leaves frame feedback, and reopens exact frames, within Free-plan limits |
 | **P2 Personal copies** | WorkspaceDO; Diffs editor and trees; browser builder; code threads; hot reload; Propose upstream (outbox writes); opt-in mirroring; PixiJS and Babylon adapters; `playtest dev`, `create`, `replay`; remaining skills with evals | A tester's change lands as a PR with mirrored feedback |
 | **P3 Authoritative retests** | CI retest jobs; expectations DSL; retest matrix; PR checks | PR shows "Playtest replays" with correct outcomes |
 | **P4 LLM** | AgentDO; browser-executed tools; CI verification; BYOK via AI Gateway | "Fix with AI" produces validated, reviewable diffs |
@@ -1910,6 +1966,7 @@ The Free-plan paths stay in place as the cheapest option and as fallbacks. Price
 
 - Rules 3–4 of §4.4.2 can be relaxed: presence twice per second, autosave every few seconds, larger outbox batches.
 - The "quota reached" states become cost alerts.
+- The no-domain profile scales without a domain, because Worker requests are no longer capped per day (they're billed instead).
 - Workspace merges and code re-anchoring could move into Durable Objects.
 - Lockstep "watch party" sessions (§16.6) become affordable.
 
@@ -2005,7 +2062,8 @@ The Free-plan overlay model remains the default.
 - [Durable Objects](https://developers.cloudflare.com/durable-objects/) and [WebSockets / Hibernation API](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 - [Agents SDK](https://developers.cloudflare.com/agents/)
 - [R2](https://developers.cloudflare.com/r2/): [public buckets and custom domains](https://developers.cloudflare.com/r2/buckets/public-buckets/), [CORS](https://developers.cloudflare.com/r2/buckets/cors/), [presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
-- [Workers static assets](https://developers.cloudflare.com/workers/static-assets/)
+- [Workers static assets](https://developers.cloudflare.com/workers/static-assets/) and [`workers.dev` subdomains](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+- [R2 limits (including `r2.dev` rate limiting)](https://developers.cloudflare.com/r2/platform/limits/)
 - [AI Gateway BYOK (stored keys)](https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/)
 
 ### Cloudflare: paid-plan upgrades (§21)
