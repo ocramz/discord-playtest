@@ -1,0 +1,7 @@
+{
+  "name": "playtest",
+  "version": "0.1.0-stub",
+  "description": "Agent skills for making JS/TS games compatible with Playtest, a Discord Activity for playtesting with deterministic replay. Stubs: content marked TODO is pending the @playtest/cli and @playtest/kit implementations.",
+  "author": { "name": "Playtest" },
+  "keywords": ["gamedev", "phaser", "threejs", "pixijs", "babylonjs", "determinism", "discord"]
+}

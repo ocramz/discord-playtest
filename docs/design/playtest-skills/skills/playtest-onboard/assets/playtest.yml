@@ -1,0 +1,17 @@
+# .github/workflows/playtest.yml
+# Builds and verifies the game for Playtest. Needs no secrets: authenticates to Playtest with GitHub's OIDC token.
+name: Playtest
+on:
+  push: { branches: [main] }          # TODO: replace main with the repository's default branch
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      job: { description: "Playtest job id", required: false }
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  playtest:
+    uses: <playtest-org>/actions/.github/workflows/playtest.yml@v1   # TODO: final org/repo name
+    with:
+      job: ${{ inputs.job }}

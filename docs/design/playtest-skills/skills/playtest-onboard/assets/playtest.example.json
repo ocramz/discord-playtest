@@ -1,0 +1,17 @@
+{
+  "$schema": "https://<domain>/schemas/playtest-1.json",
+  "name": "My Game",
+  "entry": "src/main.ts",
+  "tier": 1,
+  "adapter": "none",
+  "tickRate": 60,
+  "viewport": [960, 540],
+  "orientation": "landscape",
+  "input": {
+    "buttons": { "left": ["ArrowLeft", "KeyA"], "right": ["ArrowRight", "KeyD"], "up": ["ArrowUp", "KeyW"], "down": ["ArrowDown", "KeyS"], "action": ["Space"] },
+    "pointer": false
+  },
+  "determinism": "local",
+  "checkpointEvery": 60,
+  "assets": ["public/**"]
+}
