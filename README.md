@@ -1,2 +1,2 @@
-# discord-playtest
+# playtest
 Vibe playtesting malleable games thing
